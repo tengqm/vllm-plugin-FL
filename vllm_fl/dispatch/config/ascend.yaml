@@ -126,6 +126,8 @@ flagos_blacklist:
   - lift_fresh
   - lift_fresh_copy
   - _to_copy
+  # --- Crash: pow_scalar (chained-boolean a < b < c tl.constexpr branch) ---
+  - pow_scalar
 
 # OOT (Out-of-Tree) operator blacklist
 # These operators will NOT be registered as OOT replacements.
