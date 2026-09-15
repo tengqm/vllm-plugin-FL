@@ -52,7 +52,18 @@ except Exception:
 # (cambricon 4.4.3) lacks it, so the map stays empty and the generated copy_
 # pre/post hooks raise KeyError: 'aten::copy_'. Provide a torch 2.7.1-compatible
 # get_kernel that redispatches to the native (CompositeExplicitAutograd) kernel.
-if not hasattr(torch.library, "get_kernel"):
+#
+# torch_mlu gates the install: only flag_gems' cambricon branch calls the API
+# (runtime/op_registrar.py register_impl), and a wrong-semantics stand-in for
+# torch.library must not be visible to unrelated callers elsewhere in the
+# process. On every other vendor torch.library is left untouched.
+def _torch_mlu_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("torch_mlu") is not None
+
+
+if not hasattr(torch.library, "get_kernel") and _torch_mlu_available():
     _FALLBACK_KEYSET = torch._C.DispatchKeySet(
         torch._C.DispatchKey.CompositeExplicitAutograd
     )
@@ -62,15 +73,20 @@ if not hasattr(torch.library, "get_kernel"):
             self._qualified_name = qualified_name
 
         def call_boxed(self, keyset, *args, **kwargs):
-            namespace, name = self._qualified_name.split("::")
-            op = getattr(getattr(torch.ops, namespace), name)
-            return op.default.redispatch(_FALLBACK_KEYSET, *args, **kwargs)
+            namespace, _, overload_path = self._qualified_name.partition("::")
+            name, _, overload = overload_path.partition(".")
+            packet = getattr(getattr(torch.ops, namespace), name)
+            op = getattr(packet, overload) if overload else packet.default
+            return op.redispatch(_FALLBACK_KEYSET, *args, **kwargs)
 
-    def _get_kernel(name_or_op, dispatch_key):
-        if isinstance(name_or_op, str):
-            qualified_name = name_or_op
-        else:
-            qualified_name = name_or_op._qualified_op_name
+    def _get_kernel(name_or_op, dispatch_key=None):
+        # dispatch_key is accepted for signature compatibility but deliberately
+        # not honoured: flag_gems passes its own reg_key, and redispatching to
+        # that keyset would re-enter the very kernel it is replacing. Every call
+        # site wants the original implementation, which is what this returns.
+        qualified_name = (
+            name_or_op if isinstance(name_or_op, str) else name_or_op._qualified_op_name
+        )
         return _RedispatchKernel(qualified_name)
 
     torch.library.get_kernel = _get_kernel
